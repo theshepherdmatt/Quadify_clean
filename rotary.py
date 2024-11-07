@@ -66,39 +66,41 @@ class RotaryControl:
         current_state = (clk_state << 1) | dt_state
 
         # Detect direction based on specific transitions
+        direction_value = None
         if self.last_state == 0b11:  # Both CLK and DT are high
             if current_state == 0b01:  # Clockwise
-                self.direction = RotaryControl.RIGHT
-                print("Rotary turned clockwise.")
-                self.adjust_volume(15)  # Increase volume by 20%
+                direction_value = 1
+                print("Rotary turned clockwise (down).")
             elif current_state == 0b10:  # Counterclockwise
-                self.direction = RotaryControl.LEFT
-                print("Rotary turned counterclockwise.")
-                self.adjust_volume(-15)  # Decrease volume by 20%
+                direction_value = -1
+                print("Rotary turned counterclockwise (up).")
 
-            if self.rotation_callback:
-                if self.direction == RotaryControl.RIGHT:
-                    self.rotation_callback("Clockwise")
-                elif self.direction == RotaryControl.LEFT:
-                    self.rotation_callback("Counterclockwise")
+            # If we have a valid direction, handle the rotation based on the current mode
+            if direction_value is not None and self.mode_manager:
+                current_mode = self.mode_manager.get_mode()
+                print(f"Current mode: {current_mode}")
+
+                # Call the rotation callback with the direction value
+                if current_mode in ["menu", "webradio", "playlist"] and self.rotation_callback:
+                    self.rotation_callback(direction_value)
+                elif current_mode == "playback":
+                    # Adjust volume in playback mode
+                    volume_change = 15 if direction_value == 1 else -15
+                    self.adjust_volume(volume_change)
+                else:
+                    print(f"Unhandled mode '{current_mode}' in handle_rotation")
 
         self.last_state = current_state
 
+
     def adjust_volume(self, volume_change):
-        """Adjusts the volume by the specified amount (+/- 20%)."""
+        """Adjusts the volume by the specified amount (+/- 15%). Only call this in playback mode."""
         try:
-            # Get the current volume to adjust it
             response = requests.get("http://localhost:3000/api/v1/getState")
             if response.status_code == 200:
                 data = response.json()
-                current_volume = data.get("volume", 0)
-                if current_volume is None:
-                    current_volume = 0  # Set to 0 if current volume is not available
-
-                # Calculate the new volume, clamping it between 0 and 100
+                current_volume = data.get("volume", 0) or 0  # Set to 0 if unavailable
                 new_volume = max(0, min(100, current_volume + volume_change))
-                
-                # Make a request to Volumio to update the volume
                 requests.get(f"{self.VOL_API_URL}{new_volume}")
                 print(f"Volume adjusted to: {new_volume}%")
             else:

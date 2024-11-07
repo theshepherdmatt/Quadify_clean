@@ -71,6 +71,8 @@ radio_manager = RadioManager(device, listener, mode_manager)
 mode_manager.menu_manager = menu_manager
 mode_manager.playlist_manager = playlist_manager
 mode_manager.radio_manager = radio_manager
+#mode_manager.rotary_control = rotary_control
+
 
 # Define managers dictionary
 managers = {
@@ -180,6 +182,10 @@ def screen_update(current_mode):
         print("Switching to Webradio Mode")
         if mode_manager.radio_manager:
             mode_manager.radio_manager.start_radio_mode()  # Explicitly call the function to start RadioManager mode
+    elif current_mode == "playlist":
+        print("Switching to Playlist Mode")
+        if mode_manager.playlist_manager:
+            mode_manager.playlist_manager.start_playlist_mode()  # Explicitly call the function to start PlaylistManager mode
     else:
         print("Switching to Unknown Mode")
 
@@ -210,107 +216,24 @@ def adjust_volume(volume_change):
     except requests.RequestException as e:
         print(f"Error adjusting volume: {e}")
 
-# Define handle_button_press callback function
-def handle_button_press():
-    global last_button_press_time
-    current_time = time.time()
-
-    # Debounce logic...
-    if current_time - last_button_press_time < 1:
-        print("Button press ignored due to debounce.")
-        return
-
-    last_button_press_time = current_time
-
-    button_pressed_time = time.time()
-
-    # Cancel the timer to prevent the automatic switch to clock mode
-    if hasattr(handle_state_change, 'stop_timer') and handle_state_change.stop_timer:
-        handle_state_change.stop_timer.cancel()
-        handle_state_change.stop_timer = None
-        print("Cancelling stop timer due to button press.")
-
-    # Wait to see if the button is held down
-    while GPIO.input(rotary_control.SW_PIN) == GPIO.LOW:
-        time.sleep(0.1)
-        if time.time() - button_pressed_time > 1.5:  # Long press detected
-            print("Long button press detected.")
-            if mode_manager.get_mode() in ["menu", "webradio", "playlist", "favourites"]:
-                menu_manager.go_back()
-            return
-
-    current_mode = mode_manager.get_mode()
-    print(f"Button pressed in mode: {current_mode}")
-
-    if current_mode == "menu":
-        print("Selecting menu item.")
-        menu_manager.select_item()
-    elif current_mode == "webradio":
-        print("Selecting webradio item.")
-        if radio_manager.current_menu == "categories":
-            radio_manager.select_item()  # Navigate to stations list
-        elif radio_manager.current_menu == "stations":
-            radio_manager.select_item()  # Select and play the station
-    elif current_mode == "playlist":
-        print("Selecting playlist.")
-        playlist_manager.select_playlist()
-    elif current_mode == "clock":
-        print("Switching to menu mode.")
-        mode_manager.set_mode("menu")
-    elif current_mode == "playback":
-        if mode_manager.playback:
-            mode_manager.playback.toggle_play_pause()
-    else:
-        print("Button pressed in unrecognized mode.")
-
-
-# Define handle_rotation callback function
-def handle_rotation(direction):
-    current_mode = mode_manager.get_mode()
-    print(f"Rotary turned {direction}. Current mode: {current_mode}")
-
-    if current_mode == "menu":
-        # Scroll through the main menu
-        if direction == "Clockwise":
-            menu_manager.scroll_selection(1)
-        elif direction == "Counterclockwise":
-            menu_manager.scroll_selection(-1)
-    elif current_mode == "webradio":
-        # Scroll through radio categories or stations in RadioManager
-        if direction == "Clockwise":
-            radio_manager.scroll_selection(1)
-        elif direction == "Counterclockwise":
-            radio_manager.scroll_selection(-1)
-    elif current_mode == "playlist":
-        # Scroll through playlists
-        if direction == "Clockwise":
-            playlist_manager.scroll_selection(1)
-        elif direction == "Counterclockwise":
-            playlist_manager.scroll_selection(-1)
-    elif current_mode == "playback":
-        # Adjust volume
-        volume_change = 5 if direction == "Clockwise" else -5
-        adjust_volume(volume_change)
-    else:
-        print(f"Unhandled mode '{current_mode}' in handle_rotation")
-
-
 # Create instance of RotaryControl
 rotary_control = RotaryControl(
     clk_pin=13,
     dt_pin=5,
     sw_pin=6,
-    rotation_callback=handle_rotation,
-    button_callback=handle_button_press,
+    rotation_callback=mode_manager.handle_rotation,
+    button_callback=mode_manager.handle_button_press,
     mode_manager=mode_manager
 )
+
+mode_manager.rotary_control = rotary_control
 
 # Initialize the last_status attribute for handle_state_change
 handle_state_change.last_status = None
 
 # Initialize PlaylistManager using the listener instance
-playlist_manager = PlaylistManager(device, listener, mode_manager)
-print("PlaylistManager initialized successfully.")
+#playlist_manager = PlaylistManager(device, listener, mode_manager)
+#print("PlaylistManager initialized successfully.")
 
 def start_listener():
     listener_thread = threading.Thread(target=listener.connect)

@@ -44,30 +44,31 @@ class MenuManager:
         self.clear_display()
 
     def display_menu(self):
-        if not self.current_menu_items:
-            print("No menu items to display.")
-            return
+        max_visible_items = 4  # Number of items visible on the screen
+        total_items = len(self.current_menu_items)
 
-        # Clear the screen before displaying the menu
+        # Calculate the visible window of menu items
+        start_index = max(0, min(self.current_selection_index - max_visible_items // 2, total_items - max_visible_items))
+        end_index = min(start_index + max_visible_items, total_items)
+
         image = Image.new(self.oled.mode, (self.oled.width, self.oled.height), "black")
         draw = ImageDraw.Draw(image)
+        y_offset = 1
+        x_offset = 10
 
-        # Drawing configuration
-        y_offset = 1  # Starting Y position
-        x_offset = 10  # X position for the arrow
-
-        # Display each menu item, highlighting the current selection
-        for i, item in enumerate(self.current_menu_items):
+        # Draw the visible menu items within the calculated window
+        for i in range(start_index, end_index):
+            item = self.current_menu_items[i]
             if i == self.current_selection_index:
-                # Highlight the selected item with an arrow
                 draw.text((x_offset, y_offset), "->", font=self.font, fill="white")
                 draw.text((x_offset + 20, y_offset), item, font=self.font, fill="white")
             else:
                 draw.text((x_offset + 20, y_offset), item, font=self.font, fill="gray")
-            y_offset += 15  # Move down for the next item
+            y_offset += 15
 
-        # Update the OLED display with the menu
         self.oled.display(image)
+        print(f"[MenuManager] Displaying menu items from index {start_index} to {end_index}. Current selection index: {self.current_selection_index}")
+
 
     def scroll_selection(self, direction):
         if not self.is_active:
@@ -82,6 +83,14 @@ class MenuManager:
         if previous_index != self.current_selection_index:
             print(f"Scrolled to menu index: {self.current_selection_index}")
             self.display_menu()
+
+    def handle_rotation(self, direction):
+        if direction == "Clockwise":
+            self.scroll_selection(1)
+        elif direction == "Counterclockwise":
+            self.scroll_selection(-1)
+        mode_manager.reset_timer()  # Reset inactivity timer
+
 
     def select_item(self):
         if not self.is_active:

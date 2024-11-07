@@ -111,27 +111,34 @@ class RadioManager:
 
 
     def scroll_selection(self, direction):
+        print(f"[RadioManager] Received scroll direction: {direction}")  # Debug: Verify direction
+
         if self.current_menu == "categories":
             options = self.categories
         else:
             options = self.stations
 
         if not options:
-            print("No options available to scroll.")
+            print("[RadioManager] No options available to scroll.")
             return
 
         previous_index = self.current_selection_index
-        if direction > 0:  # Scroll down
+        # Ensure direction is an integer and handle scroll up/down correctly
+        if isinstance(direction, int) and direction > 0:  # Scroll down
             self.current_selection_index = (self.current_selection_index + 1) % len(options)
-        elif direction < 0:  # Scroll up
+        elif isinstance(direction, int) and direction < 0:  # Scroll up
             self.current_selection_index = (self.current_selection_index - 1) % len(options)
 
+        # Only update if the index actually changed
         if previous_index != self.current_selection_index:
-            print(f"Scrolled to index: {self.current_selection_index}")
+            print(f"[RadioManager] Scrolled to index: {self.current_selection_index}")
             if self.current_menu == "categories":
                 self.display_categories()
             else:
                 self.display_stations()
+        else:
+            print("[RadioManager] Index unchanged; scroll input ignored.")
+
 
     def select_item(self):
         if self.current_menu == "categories":
