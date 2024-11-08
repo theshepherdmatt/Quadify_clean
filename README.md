@@ -11,11 +11,11 @@ Contained within are all necessary files and instructions to equip your Raspberr
 * Installation of rotary encoder
 
 ## Key Considerations:
-* **This toolkit is mostly intended for new setups but it’s crafted to be forgiving enough for use on existing Volumio installations that might need repairs or adjustments post-update. While designed with our proprietary configurations in mind, it’s not exhaustively tested in every conceivable environment. Proceed with caution, understanding the risk of needing a complete system reset in extreme situations. Always ensure your data is backed up.
+* This toolkit is mostly intended for new setups but it’s crafted to be forgiving enough for use on existing Volumio installations that might need repairs or adjustments post-update. While designed with our proprietary configurations in mind, it’s not exhaustively tested in every conceivable environment. Proceed with caution, understanding the risk of needing a complete system reset in extreme situations. Always ensure your data is backed up.
 
-* **This installation process preserves most standard distribution settings. Initial configurations, especially those related to system sound and volume control via Volumio's WebUi, remain necessary. 
+* This installation process preserves most standard distribution settings. Initial configurations, especially those related to system sound and volume control via Volumio's WebUi, remain necessary. 
 
-* **An active internet connection is crucial.** for the download of necessary components, as the installation cannot proceed offline.
+* An active internet connection is crucial.** for the download of necessary components, as the installation cannot proceed offline.
 
 ## Usage : 
 * Update package repo list
@@ -25,7 +25,7 @@ sudo apt-get update
 
 * Download source files (this repository).
 ```bash
-git clone https://github.com/theshepherdmatt/Quadify.git
+git clone https://github.com/theshepherdmatt/Quadify_clean.git
 ```
 
 * Enter the directory for Volumio
