@@ -1,46 +1,105 @@
 import time
 import threading
 import requests
+from PIL import Image, ImageDraw, ImageFont
 from luma.core.interface.serial import spi
 from luma.oled.device import ssd1322
-from PIL import Image, ImageDraw, ImageFont
 from socketIO_client_nexus import SocketIO, LoggingNamespace
+import os
+from io import BytesIO
+
+from PIL import Image
+import requests
+from io import BytesIO
+
+class WebRadio:
+    def __init__(self, device, alt_font, alt_font_medium, local_album_art_path="/home/volumio/Quadify/icons/webradio.bmp"):
+        self.device = device
+        self.alt_font = alt_font
+        self.alt_font_medium = alt_font_medium
+        self.local_album_art_path = local_album_art_path  # Local fallback image path
+
+        # Load the local BMP fallback album art once during initialization
+        try:
+            self.default_album_art = Image.open(self.local_album_art_path).resize((40, 40)).convert("RGBA")
+        except IOError:
+            print("Local BMP album art not found. Please check the path.")
+            self.default_album_art = None
+
+    def draw(self, draw, data, base_image):
+        # Determine if bitrate is available
+        bitrate = data.get("bitrate", "")
+
+        # Set position for the "Webradio" label based on bitrate availability
+        webradio_y_position = 15 if bitrate else 25  # Move down if no bitrate
+
+        # Draw the "Webradio" label at the calculated position
+        draw.text((self.device.width // 2, webradio_y_position), "Webradio", font=self.alt_font_medium, fill="white", anchor="mm")
+
+        # Display bitrate if available
+        if bitrate:
+            draw.text((self.device.width // 2, 35), bitrate, font=self.alt_font, fill="white", anchor="mm")
+
+        # Attempt to load album art from URL
+        album_art_url = data.get("albumart")
+        album_art = None
+
+        if album_art_url:
+            try:
+                response = requests.get(album_art_url)
+                # Check if response contains image data
+                if response.headers["Content-Type"].startswith("image"):
+                    album_art = Image.open(BytesIO(response.content)).resize((60, 60)).convert("RGBA")
+                else:
+                    print("Album art URL did not return an image.")
+                    
+            except requests.RequestException:
+                print("Could not load album art (network error).")
+            except (PIL.UnidentifiedImageError, IOError):
+                print("Could not load album art (unsupported format).")
+        
+        # Use the local BMP fallback if URL fetching fails
+        if album_art is None and self.default_album_art:
+            album_art = self.default_album_art
+
+        # Paste album art on display if available
+        if album_art:
+            base_image.paste(album_art, (190, -4), album_art)
 
 
 class Playback:
     def __init__(self, device, state, mode_manager, host='localhost', port=3000):
-        # Store the device reference
         self.device = device
         self.state = state
         self.mode_manager = mode_manager
         self.host = host
         self.port = port
-        
+        self.running = False
+        self.VOL_API_URL = "http://localhost:3000/api/v1/getState"
+        self.previous_service = None
         self.socketIO = SocketIO(self.host, self.port, LoggingNamespace)
 
-        # Load fonts
         font_path = "/home/volumio/Quadify/DSEG7Classic-Light.ttf"
         alt_font_path = "/home/volumio/Quadify/OpenSans-Regular.ttf"
         try:
             self.large_font = ImageFont.truetype(font_path, 45)
-            self.small_font = ImageFont.truetype(font_path, 8)
+            self.alt_font_medium = ImageFont.truetype(alt_font_path, 18)
             self.alt_font = ImageFont.truetype(alt_font_path, 12)
-            self.alt_font_small = ImageFont.truetype(alt_font_path, 12)
-            self.alt_font_smaller = ImageFont.truetype(alt_font_path, 8)
         except IOError:
             print("Font file not found. Please check the font paths.")
             exit()
 
-        # Load the Tidal logo
-        try:
-            self.tidal_logo = Image.open("/home/volumio/Quadify/tidal.bmp").convert("1").resize((12, 12))
-        except IOError:
-            print("Logo file not found. Please check the path to the logo image.")
-            exit()
+        self.icons = {}
+        services = ["favourites", "nas", "playlists", "qobuz", "tidal", "webradio", "mpd", "default"]
+        icon_dir = "/home/volumio/Quadify/icons"
+        for service in services:
+            try:
+                icon_path = os.path.join(icon_dir, f"{service}.bmp")
+                self.icons[service] = Image.open(icon_path).convert("RGB").resize((40, 40))
+            except IOError:
+                print(f"Icon for {service} not found. Please check the path.")
 
-        self.running = False
-        self.update_thread = None
-        self.VOL_API_URL = "http://localhost:3000/api/v1/getState"
+        self.webradio = WebRadio(self.device, self.alt_font, self.alt_font_medium)
 
     def get_volumio_data(self):
         try:
@@ -53,79 +112,76 @@ class Playback:
             print(f"Error fetching data from Volumio: {e}")
         return None
 
+    def get_text_dimensions(self, text, font):
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        return width, height
+
     def draw_display(self, data):
-        # Create a blank image to draw on
+        current_service = data.get("service", "default").lower()
+        
+        # Clear the display if the service has changed
+        if current_service != self.previous_service:
+            self.device.clear()
+            self.previous_service = current_service
+
+        # Create an image to draw on
         image = Image.new("RGB", (self.device.width, self.device.height), "black")
         draw = ImageDraw.Draw(image)
 
-        # Extract the relevant data from Volumio
-        volume = data.get("volume", 0)  # Get the volume, default to 0 if not available
-        try:
-            volume = int(volume)
-        except (ValueError, TypeError):
-            volume = 0  # Fallback to 0 if conversion fails
-
-        # Clamp volume between 0 and 100
-        volume = max(0, min(volume, 100))
-
-        # Extract other relevant data from Volumio
-        sample_rate = data.get("samplerate", "0 kHz") or "0 kHz"
-        if ' ' in sample_rate:
-            sample_rate_value, sample_rate_unit = sample_rate.split()
-        else:
-            sample_rate_value, sample_rate_unit = (sample_rate, '')
-
-        sample_rate_value = sample_rate_value.rjust(4)  # Right-justify the value to ensure alignment
-        sample_rate_unit = sample_rate_unit.lower()
-
-        audio_format = data.get("trackType", "Unknown") or "Unknown"
-        bitrate = data.get("bitrate", "Unknown") or "Unknown"
-        if bitrate == "Unknown":
-            # Use bitdepth if bitrate is not provided
-            bitdepth = data.get("bitdepth", "")
-            bitrate = f"{bitdepth}" if bitdepth else "Unknown"
-
-        # Determine the service being used and add the Tidal logo if it's Tidal
-        service = data.get("service", "unknown").lower()
-        if "tidal" in service:
-            image.paste(self.tidal_logo, (200, 10))  # Position the Tidal logo above the bitrate (adjust coordinates as needed)
-
-        # Draw sample rate with unit in the center
-        draw.text((self.device.width / 2 + -10, self.device.height / 2 - 4), sample_rate_value, font=self.large_font, fill="white", anchor="mm")
-        draw.text((self.device.width / 2 + 45, self.device.height / 1.5 + 2), sample_rate_unit, font=self.alt_font_small, fill="white", anchor="lm")
-
-        # Draw audio format to the right of the sample rate
-        draw.text((self.device.width * 0.9, self.device.height * 0.2), audio_format, font=self.alt_font, fill="white", anchor="mm")
-
-        # Draw bitrate below the audio format
-        draw.text((self.device.width * 0.9, self.device.height * 0.4), bitrate, font=self.alt_font, fill="white", anchor="mm")
-
-        # Calculate number of squares to fill based on volume (0-100 mapped to 6 squares)
+        # Draw volume indicator
+        volume = max(0, min(int(data.get("volume", 0)), 100))
         filled_squares = round((volume / 100) * 6)
-
-        # Draw the two vertical columns of 6 smaller squares filling from bottom up
-        square_size = 4      # Size of each square
-        row_spacing = 4      # Spacing between squares vertically
-        padding_bottom = 12  # Padding from the bottom of the display
-        columns = [8, 28]   # Original x positions for the two columns
+        square_size = 4
+        row_spacing = 4
+        padding_bottom = 12
+        columns = [8, 28]
 
         for x in columns:
             for row in range(6):
-                # Calculate y starting from the bottom
                 y = self.device.height - padding_bottom - ((row + 1) * (square_size + row_spacing))
-
-                # Draw the word 'Volume' below the squares after drawing the last row
-                if row == 5 and x == columns[1]:
-                    draw.text((columns[0], self.device.height - padding_bottom + 4), 'Volume', font=self.alt_font_smaller, fill="white", anchor="lm")
-
                 if row < filled_squares:
-                    # Filled square
                     draw.rectangle([x, y, x + square_size, y + square_size], fill="white")
                 else:
-                    # Empty square (only outline)
                     draw.rectangle([x, y, x + square_size, y + square_size], outline="white")
 
-        # Display the image on the device
+        # Draw specific content based on service type
+        if current_service == "webradio":
+            # Use WebRadio class to handle web radio specific display
+            self.webradio.draw(draw, data, image)
+        else:
+            # Display sample rate and bit depth for other services
+            sample_rate = data.get("samplerate", "0 KHz")
+            sample_rate_value, sample_rate_unit = sample_rate.split() if ' ' in sample_rate else (sample_rate, "")
+
+            try:
+                sample_rate_value = str(int(float(sample_rate_value)))
+            except ValueError:
+                sample_rate_value = "0"
+
+            # Position sample rate in the center
+            sample_rate_width, _ = self.get_text_dimensions(sample_rate_value, self.large_font)
+            sample_rate_x = self.device.width / 2 - sample_rate_width / 2
+            sample_rate_y = 26
+            unit_x = sample_rate_x + sample_rate_width - 25
+            unit_y = sample_rate_y + 19
+
+            # Draw text for sample rate and unit
+            draw.text((sample_rate_x, sample_rate_y), sample_rate_value, font=self.large_font, fill="white", anchor="mm")
+            draw.text((unit_x, unit_y), sample_rate_unit, font=self.alt_font, fill="white", anchor="lm")
+
+            # Display audio format and bit depth
+            audio_format = data.get("trackType", "Unknown")
+            bitdepth = data.get("bitdepth") or "N/A"
+            format_bitdepth_text = f"{audio_format}/{bitdepth}"
+            draw.text((210, 45), format_bitdepth_text, font=self.alt_font, fill="white", anchor="mm")
+
+            # Display the icon based on service type
+            icon = self.icons.get(current_service, self.icons["default"])
+            image.paste(icon, (185, 0))
+
+        # Display the final image on the OLED screen
         self.device.display(image)
 
     def start(self):
@@ -140,7 +196,8 @@ class Playback:
             self.running = False
             if self.update_thread:
                 self.update_thread.join()
-            self.mode_manager.clear_screen()  # Clear the screen before stopping
+            if self.mode_manager:
+                self.mode_manager.clear_screen()
             print("Playback mode stopped and screen cleared.")
 
     def update_display(self):
@@ -150,24 +207,10 @@ class Playback:
                 self.draw_display(data)
             else:
                 print("No data received from Volumio.")
-            time.sleep(2)  # Update every 2 seconds
+            time.sleep(1)
+
 
     def toggle_play_pause(self):
         # Emit the play/pause command to Volumio
         print("Toggling play/pause")
         self.socketIO.emit('toggle')
-        
-
-# Example usage
-if __name__ == "__main__":
-    # Assuming you have a device object to pass
-    serial = spi(device=0, port=0)
-    device = ssd1322(serial, rotate=2)
-
-    # Pass a dummy mode_manager or None (if it's just for testing without ModeManager implementation)
-    playback = Playback(device, state={}, mode_manager=None)  # Updated this line
-    try:
-        playback.start()
-        time.sleep(10)
-    finally:
-        playback.stop()

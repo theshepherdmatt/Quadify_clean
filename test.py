@@ -1,139 +1,219 @@
-import smbus
 import time
-import json
+import threading
 import requests
-from socketIO_client_nexus import SocketIO
-from subprocess import call
+from PIL import Image, ImageDraw, ImageFont
+from luma.core.interface.serial import spi
+from luma.oled.device import ssd1322
+from socketIO_client_nexus import SocketIO, LoggingNamespace
+import os
+from io import BytesIO
 
-# MCP23017 Register Definitions
-MCP23017_ADDRESS = 0x20
-MCP23017_IODIRA = 0x00
-MCP23017_IODIRB = 0x01
-MCP23017_GPIOA = 0x12
-MCP23017_GPIOB = 0x13
-MCP23017_GPPUA = 0x0C
-MCP23017_GPPUB = 0x0D
+from PIL import Image
+import requests
+from io import BytesIO
 
-# Initialize I2C bus and set up MCP23017
-bus = smbus.SMBus(1)
+class WebRadio:
+    def __init__(self, device, alt_font, alt_font_medium, local_album_art_path="/home/volumio/Quadify/icons/webradio.bmp"):
+        self.device = device
+        self.alt_font = alt_font
+        self.alt_font_medium = alt_font_medium
+        self.local_album_art_path = local_album_art_path  # Local fallback image path
 
-# SocketIO setup for Volumio
-VOLUMIO_URL = "http://localhost:3000/api/v1/commands/?cmd="
-volumioIO = SocketIO('localhost', 3000)
+        # Load the local BMP fallback album art once during initialization
+        try:
+            self.default_album_art = Image.open(self.local_album_art_path).resize((40, 40)).convert("RGBA")
+        except IOError:
+            print("Local BMP album art not found. Please check the path.")
+            self.default_album_art = None
 
-# Button and LED mappings
-button_map = [[2, 1], [4, 3], [6, 5], [8, 7]]
-prev_button_state = [[1, 1], [1, 1], [1, 1], [1, 1]]
-led_state = 0
+    def draw(self, draw, data, base_image):
+        # Draw web radio text and title
+        draw.text((self.device.width // 2, 15), "Webradio", font=self.alt_font_medium, fill="white", anchor="mm")
+        
+        title = data.get("title", "No Title")
+        draw.text((self.device.width // 2, 35), title, font=self.alt_font, fill="white", anchor="mm")
 
-def initialize_mcp23017():
-    print("Configuring MCP23017 I/O expander.")
-    bus.write_byte_data(MCP23017_ADDRESS, MCP23017_IODIRB, 0x3C)
-    bus.write_byte_data(MCP23017_ADDRESS, MCP23017_GPPUB, 0x3C)
-    bus.write_byte_data(MCP23017_ADDRESS, MCP23017_IODIRA, 0x00)
-    bus.write_byte_data(MCP23017_ADDRESS, MCP23017_GPIOA, 0x00)  # Turn off all LEDs initially
+        # Attempt to load album art from URL
+        album_art_url = data.get("albumart")
+        album_art = None
 
-def control_leds(state):
-    print(f"Setting LED state to: {bin(state)}")
-    bus.write_byte_data(MCP23017_ADDRESS, MCP23017_GPIOA, state)
-    time.sleep(0.1)
-    read_back = bus.read_byte_data(MCP23017_ADDRESS, MCP23017_GPIOA)
-    if read_back != state:
-        print("LED state did not match; retrying...")
-        bus.write_byte_data(MCP23017_ADDRESS, MCP23017_GPIOA, state)
+        if album_art_url:
+            try:
+                response = requests.get(album_art_url)
+                # Check if response contains image data
+                if response.headers["Content-Type"].startswith("image"):
+                    album_art = Image.open(BytesIO(response.content)).resize((60, 60)).convert("RGBA")
+                else:
+                    print("Album art URL did not return an image.")
+                    
+            except requests.RequestException:
+                print("Could not load album art (network error).")
+            except (PIL.UnidentifiedImageError, IOError):
+                print("Could not load album art (unsupported format).")
+        
+        # Use the local BMP fallback if URL fetching fails
+        if album_art is None and self.default_album_art:
+            album_art = self.default_album_art
 
-def read_button_matrix():
-    button_matrix_state = [[0, 0], [0, 0], [0, 0], [0, 0]]
-    for column in range(2):
-        bus.write_byte_data(MCP23017_ADDRESS, MCP23017_GPIOB, ~(1 << column) & 0x03)
-        row_state = bus.read_byte_data(MCP23017_ADDRESS, MCP23017_GPIOB) & 0x3C
-        for row in range(4):
-            button_matrix_state[row][column] = (row_state >> (row + 2)) & 1
-    return button_matrix_state
+        # Paste album art on display if available
+        if album_art:
+            base_image.paste(album_art, (190, -4), album_art)
 
-def execute_volumio_command(command):
-    try:
-        print(f"Executing Volumio command: {command}")
-        volumioIO.emit(command)
-    except Exception as e:
-        print(f"Error sending command '{command}' to Volumio: {e}")
 
-def restart_oled_service():
-    print("Restarting OLED service...")
-    call("sudo systemctl restart oled.service", shell=True)
+class Playback:
+    def __init__(self, device, state, mode_manager, host='localhost', port=3000):
+        self.device = device
+        self.state = state
+        self.mode_manager = mode_manager
+        self.host = host
+        self.port = port
+        self.running = False
+        self.VOL_API_URL = "http://localhost:3000/api/v1/getState"
+        self.previous_service = None
+        self.socketIO = SocketIO(self.host, self.port, LoggingNamespace)
 
-def handle_button_press(button_id):
-    global led_state
-    if button_id == 7:
-        add_to_favourites()
-    elif button_id == 8:
-        restart_oled_service()
-    else:
-        command = get_volumio_command(button_id)
-        if command:
-            execute_volumio_command(command)
+        font_path = "/home/volumio/Quadify/DSEG7Classic-Light.ttf"
+        alt_font_path = "/home/volumio/Quadify/OpenSans-Regular.ttf"
+        try:
+            self.large_font = ImageFont.truetype(font_path, 45)
+            self.alt_font_medium = ImageFont.truetype(alt_font_path, 18)
+            self.alt_font = ImageFont.truetype(alt_font_path, 12)
+        except IOError:
+            print("Font file not found. Please check the font paths.")
+            exit()
 
-    # Update LEDs for the current button
-    led_state = 1 << (8 - button_id)
-    control_leds(led_state)
+        self.icons = {}
+        services = ["favourites", "nas", "playlists", "qobuz", "tidal", "webradio", "mpd", "default"]
+        icon_dir = "/home/volumio/Quadify/icons"
+        for service in services:
+            try:
+                icon_path = os.path.join(icon_dir, f"{service}.bmp")
+                self.icons[service] = Image.open(icon_path).convert("RGB").resize((40, 40))
+            except IOError:
+                print(f"Icon for {service} not found. Please check the path.")
 
-def get_volumio_command(button_id):
-    commands = {
-        1: "play",
-        2: "pause",
-        3: "previous",
-        4: "next",
-        5: "setRepeat",
-        6: "setRandom",
-    }
-    return commands.get(button_id, "")
+        self.webradio = WebRadio(self.device, self.alt_font, self.alt_font_medium)
 
-def add_to_favourites():
-    print("Adding current track to favourites.")
-    volumioIO.emit('getState')
+    def get_volumio_data(self):
+        try:
+            response = requests.get(self.VOL_API_URL)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Failed to connect to Volumio. Status code: {response.status_code}")
+        except requests.RequestException as e:
+            print(f"Error fetching data from Volumio: {e}")
+        return None
 
-    @volumioIO.on('pushState')
-    def on_state(state):
-        track_uri = state.get("uri")
-        if track_uri:
-            volumioIO.emit('addToFavourites', {'service': 'mpd', 'uri': track_uri})
-            print(f"Track added to favourites: {track_uri}")
+    def get_text_dimensions(self, text, font):
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        return width, height
+
+    def draw_display(self, data):
+        current_service = data.get("service", "default").lower()
+        
+        # Clear the display if the service has changed
+        if current_service != self.previous_service:
+            self.device.clear()
+            self.previous_service = current_service
+
+        # Create an image to draw on
+        image = Image.new("RGB", (self.device.width, self.device.height), "black")
+        draw = ImageDraw.Draw(image)
+
+        # Draw volume indicator
+        volume = max(0, min(int(data.get("volume", 0)), 100))
+        filled_squares = round((volume / 100) * 6)
+        square_size = 4
+        row_spacing = 4
+        padding_bottom = 12
+        columns = [8, 28]
+
+        for x in columns:
+            for row in range(6):
+                y = self.device.height - padding_bottom - ((row + 1) * (square_size + row_spacing))
+                if row < filled_squares:
+                    draw.rectangle([x, y, x + square_size, y + square_size], fill="white")
+                else:
+                    draw.rectangle([x, y, x + square_size, y + square_size], outline="white")
+
+        # Draw specific content based on service type
+        if current_service == "webradio":
+            # Use WebRadio class to handle web radio specific display
+            self.webradio.draw(draw, data, image)
         else:
-            print("No track currently playing.")
+            # Display sample rate and bit depth for other services
+            sample_rate = data.get("samplerate", "0 KHz")
+            sample_rate_value, sample_rate_unit = sample_rate.split() if ' ' in sample_rate else (sample_rate, "")
 
-def check_buttons_and_update_leds():
-    global prev_button_state
-    button_matrix = read_button_matrix()
+            try:
+                sample_rate_value = str(int(float(sample_rate_value)))
+            except ValueError:
+                sample_rate_value = "0"
 
-    for row in range(4):
-        for col in range(2):
-            button_id = button_map[row][col]
-            current_button_state = button_matrix[row][col]
-            if current_button_state == 0 and prev_button_state[row][col] != current_button_state:
-                print(f"Button {button_id} pressed")
-                handle_button_press(button_id)
-            prev_button_state[row][col] = current_button_state
+            # Position sample rate in the center
+            sample_rate_width, _ = self.get_text_dimensions(sample_rate_value, self.large_font)
+            sample_rate_x = self.device.width / 2 - sample_rate_width / 2
+            sample_rate_y = 26
+            unit_x = sample_rate_x + sample_rate_width - 25
+            unit_y = sample_rate_y + 19
 
-    time.sleep(0.1)
-    check_buttons_and_update_leds()
+            # Draw text for sample rate and unit
+            draw.text((sample_rate_x, sample_rate_y), sample_rate_value, font=self.large_font, fill="white", anchor="mm")
+            draw.text((unit_x, unit_y), sample_rate_unit, font=self.alt_font, fill="white", anchor="lm")
 
-def update_play_pause_leds():
+            # Display audio format and bit depth
+            audio_format = data.get("trackType", "Unknown")
+            bitdepth = data.get("bitdepth") or "N/A"
+            format_bitdepth_text = f"{audio_format}/{bitdepth}"
+            draw.text((210, 45), format_bitdepth_text, font=self.alt_font, fill="white", anchor="mm")
+
+            # Display the icon based on service type
+            icon = self.icons.get(current_service, self.icons["default"])
+            image.paste(icon, (185, 0))
+
+        # Display the final image on the OLED screen
+        self.device.display(image)
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.update_thread = threading.Thread(target=self.update_display)
+            self.update_thread.start()
+            print("Playback mode started.")
+
+    def stop(self):
+        if self.running:
+            self.running = False
+            if self.update_thread:
+                self.update_thread.join()
+            if self.mode_manager:
+                self.mode_manager.clear_screen()
+            print("Playback mode stopped and screen cleared.")
+
+    def update_display(self):
+        while self.running:
+            data = self.get_volumio_data()
+            if data:
+                self.draw_display(data)
+            else:
+                print("No data received from Volumio.")
+            time.sleep(1)
+
+# Main Execution
+if __name__ == "__main__":
     try:
-        response = requests.get("http://localhost:3000/api/v1/getState")
-        state = response.json().get("status")
-        if state == "play":
-            led_state = 1
-        elif state == "pause":
-            led_state = 2
-        control_leds(led_state)
+        serial = spi(device=0, port=0)
+        device = ssd1322(serial, rotate=2)
+        playback = Playback(device, state={}, mode_manager=None)
+        playback.start()
+        print("Press Ctrl+C to exit.")
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        playback.stop()
     except Exception as e:
-        print(f"Error updating play/pause LEDs: {e}")
-
-def start_status_update_loop():
-    while True:
-        update_play_pause_leds()
-        time.sleep(5)
-
-initialize_mcp23017()
-check_buttons_and_update_leds()
-start_status_update_loop()
+        print(f"An error occurred: {e}")
+        playback.stop()

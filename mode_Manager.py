@@ -3,12 +3,12 @@ import threading
 import RPi.GPIO as GPIO
 from PIL import Image
 from playback import Playback
-from menus import PlaylistManager, RadioManager
+from menus import PlaylistManager
 
 last_button_press_time = 0  # Initialize button press debounce timer
 
 class ModeManager:
-    def __init__(self, oled, clock, menu_manager=None, playlist_manager=None, radio_manager=None, volumio_listener=None, rotary_control=None):
+    def __init__(self, oled, clock, menu_manager=None, playlist_manager=None, volumio_listener=None, rotary_control=None):
         self.current_mode = "clock"
         self.home_mode = "clock"
         self.is_playing = False
@@ -17,13 +17,13 @@ class ModeManager:
         self.clock = clock
         self.menu_manager = menu_manager
         self.playlist_manager = playlist_manager
-        self.radio_manager = radio_manager
-        self.playback = None
         self.volumio_listener = volumio_listener
+        self.rotary_control = rotary_control
+        self.playback = None
         self.mode_lock = threading.Lock()
         self._blank_image = Image.new(oled.mode, (oled.width, oled.height), "black") if oled else None
         self.last_button_press_time = 0
-        self.rotary_control = rotary_control
+        self.stop_delay_timer = None
 
     def set_mode(self, new_mode, playback_state=None):
         with self.mode_lock:
@@ -34,16 +34,28 @@ class ModeManager:
                 print(f"Already in {new_mode} mode. Skipping re-entry.")
                 return
 
-            # Clear screen only if switching modes
-            if self.current_mode != new_mode:
-                print(f"Transitioning from '{self.current_mode}' to '{new_mode}'. Clearing screen.")
-                self.clear_screen()
+            # Stop any active mode before switching
+            if self.current_mode == "playback":
+                self.stop_playback()
+            elif self.current_mode == "playlist" and new_mode != "playlist":
+                self.stop_playlist_mode()
+            elif self.current_mode == "clock" and new_mode != "clock":
+                self.clock.stop()
 
-            # Exit and switch mode
-            self._exit_current_mode()
+            print(f"Transitioning from '{self.current_mode}' to '{new_mode}'. Clearing screen.")
+            self.clear_screen()
+
+            # Enter new mode
             self.current_mode = new_mode
             self._enter_new_mode(new_mode, playback_state)
             self.notify_mode_change()
+
+    def stop_all_modes(self):
+        """Stops all active modes."""
+        self.stop_clock()
+        self.stop_playback()
+        self.stop_menu_mode()
+        self.stop_playlist_mode()
 
     def get_mode(self):
         return self.current_mode
@@ -53,18 +65,44 @@ class ModeManager:
             self.oled.display(self._blank_image)
             print("OLED display cleared.")
 
+    def stop_clock(self):
+        """Stops the clock mode if it is currently running."""
+        if self.clock and self.clock.running:
+            self.clock.stop()
+            print("Clock mode stopped.")
+
     def process_state_change(self, state):
-        """Handles playback state changes and updates mode accordingly."""
+        """
+        Handles playback state changes and updates mode accordingly.
+        """
         status = state.get("status", "")
         self.is_playing = status == "play"
 
         if self.is_playing:
-            # Enter playback mode if there's active playback
+            # Cancel any pending stop delay if playback resumes
+            if self.stop_delay_timer and self.stop_delay_timer.is_alive():
+                self.stop_delay_timer.cancel()
+            # Ensure clock mode is stopped and set to playback mode
+            self.stop_clock()
             self.set_mode("playback", playback_state=state)
         else:
-            # Stop playback and revert to clock mode if playback stops or pauses
-            print(f"Playback stopped or paused. Switching to clock mode.")
+            # Start a delayed check to transition to clock mode
+            if self.stop_delay_timer and self.stop_delay_timer.is_alive():
+                self.stop_delay_timer.cancel()
+            self.stop_delay_timer = threading.Timer(5, self._delayed_stop_check)
+            self.stop_delay_timer.start()
+
+    def _delayed_stop_check(self):
+        """
+        Checks playback state after a delay to decide whether to switch to clock mode.
+        """
+        # Re-check if the playback status is still "stop"
+        if not self.is_playing:
+            print("Playback still stopped after delay; switching to clock mode.")
+            self.stop_playback()
             self.set_mode("clock")
+        else:
+            print("Playback resumed before delay elapsed; staying in playback mode.")
 
     def handle_rotation(self, direction):
         current_mode = self.get_mode()
@@ -87,7 +125,7 @@ class ModeManager:
         current_time = time.time()
 
         # Debounce logic to avoid multiple triggers in a short span
-        if current_time - last_button_press_time < 0.3:  # Adjust debounce time if needed
+        if current_time - last_button_press_time < 0.3:
             print("Button press ignored due to debounce.")
             return
 
@@ -97,17 +135,14 @@ class ModeManager:
         # Detect if the button is held down
         while GPIO.input(self.rotary_control.SW_PIN) == GPIO.LOW:
             time.sleep(0.1)
-            if time.time() - button_pressed_time > 1.5:  # Long press detected after 1.5 seconds
+            if time.time() - button_pressed_time > 1.5:
                 print("Long button press detected: Switching to clock mode.")
                 if self.current_mode != "clock":
-                    self.set_mode("clock")  # Enter clock mode immediately
-
-                # Keep checking the button state until it’s released
+                    self.set_mode("clock")
                 while GPIO.input(self.rotary_control.SW_PIN) == GPIO.LOW:
-                    time.sleep(0.1)  # Continue to hold clock mode while button is pressed
-
+                    time.sleep(0.1)
                 print("Button released; remaining in clock mode.")
-                return  # Exit function upon button release
+                return
 
         # Regular short press actions
         current_mode = self.get_mode()
@@ -126,7 +161,6 @@ class ModeManager:
         else:
             print("Button short-press in unrecognized mode.")
 
-
     def _exit_current_mode(self):
         if self.current_mode == "clock" and self.clock.running:
             self.clock.stop()
@@ -142,6 +176,7 @@ class ModeManager:
         elif self.current_mode == "playlist" and self.playlist_manager:
             self.playlist_manager.stop_playlist_mode()
             print("Stopping playlist mode.")
+
 
     def _enter_new_mode(self, new_mode, playback_state):
         if new_mode == "clock":
@@ -170,6 +205,12 @@ class ModeManager:
             self.playback = None
             self.is_playing = False
             print("Playback mode stopped.")
+
+    def stop_playlist_mode(self):
+        """Stops playlist mode by deactivating the playlist manager display."""
+        if self.playlist_manager and self.playlist_manager.is_active:
+            self.playlist_manager.stop_playlist_mode()
+            print("[ModeManager] Playlist mode stopped.")
 
     def notify_mode_change(self):
         print(f"Mode changed to: {self.current_mode}")

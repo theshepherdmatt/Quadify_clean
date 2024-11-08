@@ -39,11 +39,16 @@ class PlaylistManager:
 
     def start_playlist_mode(self):
         self.is_active = True
-        self.is_loading = True  # Set loading flag to true
         self.current_selection_index = 0
-        self.playlists = []
-        self.display_loading_screen()
-        self.volumio_listener.fetch_playlists()
+        
+        if not self.playlists:
+            # If playlists haven't been fetched yet, display loading
+            self.display_loading_screen()
+            self.fetch_playlists()
+        else:
+            # If playlists are ready, display them immediately
+            self.display_playlists()
+
 
     def display_loading_screen(self):
         self.clear_display()  # Clear display first
@@ -64,24 +69,20 @@ class PlaylistManager:
     def update_playlists(self, playlists):
         print(f"[PlaylistManager] update_playlists called - is_active: {self.is_active}, received playlists count: {len(playlists)}")
 
-        # Enable display temporarily for immediate initialization
-        was_active = self.is_active  # Save the previous state
-        self.is_active = True
-
         # Assign playlists and log details
         self.playlists = playlists or []
         print(f"[PlaylistManager] After assignment - playlists count: {len(self.playlists)}")
         
-        # Display the playlists immediately
-        if self.playlists:
-            print(f"[PlaylistManager] Displaying playlists: {[p['title'] for p in self.playlists]}")
-            self.display_playlists()
+        # Only display playlists if PlaylistManager is active
+        if self.is_active:
+            if self.playlists:
+                print(f"[PlaylistManager] Displaying playlists: {[p['title'] for p in self.playlists]}")
+                self.display_playlists()
+            else:
+                print("[PlaylistManager] No playlists to display; showing 'No Playlists Found' message.")
+                self.display_no_playlists_message()
         else:
-            print("[PlaylistManager] No playlists to display; showing 'No Playlists Found' message.")
-            self.display_no_playlists_message()
-
-        # Restore `is_active` to its previous state
-        self.is_active = was_active
+            print("[PlaylistManager] Playlists updated but not displayed as PlaylistManager is inactive.")
 
 
 
